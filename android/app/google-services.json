@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "772731195741",
+    "project_id": "guestchat-922",
+    "storage_bucket": "guestchat-922.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:772731195741:android:e88c966b15b3d0531598b4",
+        "android_client_info": {
+          "package_name": "com.guestchat.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyABlFnm6_mx_dO98dl5RmwIMpe5ITmpnqY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
