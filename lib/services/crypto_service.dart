@@ -7,7 +7,7 @@ import 'package:pointycastle/export.dart';
 class CryptoService {
   static String generateKey() {
     final random = Random.secure();
-    final bytes = Uint8List(32); // 256-bit key
+    final bytes = Uint8List(32);
     for (var i = 0; i < 32; i++) {
       bytes[i] = random.nextInt(256);
     }
@@ -17,62 +17,43 @@ class CryptoService {
   static String encrypt(String plaintext, String keyBase64) {
     final key = _base64urlToBuffer(keyBase64);
     final iv = _randomBytes(12);
-    final plainBytes = utf8.encode(plaintext);
+    final plainBytes = Uint8List.fromList(utf8.encode(plaintext));
 
     final cipher = GCMBlockCipher(AESEngine())
       ..init(
         true,
-        AEADParameters(
-          KeyParameter(key),
-          128, // tag length in bits
-          iv,
-          Uint8List(0),
-        ),
+        AEADParameters(KeyParameter(key), 128, iv, Uint8List(0)),
       );
 
     final output = Uint8List(cipher.getOutputSize(plainBytes.length));
-    final len = cipher.processBytes(
-      Uint8List.fromList(plainBytes),
-      0,
-      plainBytes.length,
-      output,
-      0,
-    );
-    cipher.doFinal(output, len);
+    var offset = cipher.processBytes(plainBytes, 0, plainBytes.length, output, 0);
+    offset += cipher.doFinal(output, offset);
 
     final ivStr = _bufferToBase64url(iv);
-    final cipherStr = _bufferToBase64url(output);
+    final cipherStr = _bufferToBase64url(Uint8List.view(output.buffer, 0, offset));
     return '$ivStr:$cipherStr';
   }
 
   static String decrypt(String payload, String keyBase64) {
     try {
-      final parts = payload.split(':');
-      if (parts.length != 2) return '[Decryption failed]';
+      final idx = payload.indexOf(':');
+      if (idx == -1) return '[Decryption failed]';
 
-      final iv = _base64urlToBuffer(parts[0]);
-      final cipherBytes = _base64urlToBuffer(parts[1]);
+      final iv = _base64urlToBuffer(payload.substring(0, idx));
+      final cipherBytes = _base64urlToBuffer(payload.substring(idx + 1));
       final key = _base64urlToBuffer(keyBase64);
 
       final cipher = GCMBlockCipher(AESEngine())
         ..init(
           false,
-          AEADParameters(
-            KeyParameter(key),
-            128,
-            iv,
-            Uint8List(0),
-          ),
+          AEADParameters(KeyParameter(key), 128, iv, Uint8List(0)),
         );
 
       final output = Uint8List(cipher.getOutputSize(cipherBytes.length));
-      final len =
-          cipher.processBytes(cipherBytes, 0, cipherBytes.length, output, 0);
-      cipher.doFinal(output, len);
+      var offset = cipher.processBytes(cipherBytes, 0, cipherBytes.length, output, 0);
+      offset += cipher.doFinal(output, offset);
 
-      // Remove padding/tag — output contains plaintext + may have trailing zeros
-      final plainLen = len + cipher.doFinal(output, len);
-      return utf8.decode(output.sublist(0, plainLen - 16)); // subtract 16 byte tag
+      return utf8.decode(Uint8List.view(output.buffer, 0, offset));
     } catch (_) {
       return '[Decryption failed]';
     }
