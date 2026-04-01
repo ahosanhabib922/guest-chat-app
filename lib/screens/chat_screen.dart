@@ -217,7 +217,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _copyLink() {
     final link =
-        'https://guestchat-922.web.app/chat/${widget.roomId}#${widget.encryptionKey}';
+        'https://guest-chat-web.vercel.app/chat/${widget.roomId}#${widget.encryptionKey}';
     Clipboard.setData(ClipboardData(text: link));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Invite link copied!')),
