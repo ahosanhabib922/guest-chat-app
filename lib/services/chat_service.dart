@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'crypto_service.dart';
@@ -15,6 +17,9 @@ const List<Map<String, dynamic>> ttlOptions = [
   {'label': '24 hours', 'value': 1440},
 ];
 
+const int maxFileSize = 5 * 1024 * 1024; // 5MB
+const int chunkMax = 800000; // 800KB per Firestore doc
+
 class ChatMessage {
   final String id;
   final String text;
@@ -23,11 +28,11 @@ class ChatMessage {
   final String senderAvatar;
   final Timestamp? timestamp;
   final bool edited;
-  // Media fields
-  final String? mediaId;
   final String? mediaName;
   final String? mediaType;
   final int? mediaSize;
+  final String? encMediaData; // inline encrypted data
+  final int? mediaChunks;    // number of chunks for large files
 
   ChatMessage({
     required this.id,
@@ -37,11 +42,14 @@ class ChatMessage {
     required this.senderAvatar,
     this.timestamp,
     this.edited = false,
-    this.mediaId,
     this.mediaName,
     this.mediaType,
     this.mediaSize,
+    this.encMediaData,
+    this.mediaChunks,
   });
+
+  bool get hasMedia => encMediaData != null || (mediaChunks != null && mediaChunks! > 0);
 }
 
 class ChatService {
@@ -54,14 +62,6 @@ class ChatService {
     return String.fromCharCodes(
       List.generate(6, (_) => chars.codeUnitAt(random.nextInt(chars.length))),
     );
-  }
-
-  static String generateMediaId() {
-    final random = Random.secure();
-    final suffix = List.generate(6, (_) => random.nextInt(36))
-        .map((n) => n < 10 ? '$n' : String.fromCharCode(97 + n - 10))
-        .join();
-    return 'media-${DateTime.now().millisecondsSinceEpoch}-$suffix';
   }
 
   static Future<String> getAnonymousUser() async {
@@ -92,11 +92,7 @@ class ChatService {
   }) async {
     final encText = CryptoService.encrypt(text, encryptionKey);
     final encName = CryptoService.encrypt(senderName, encryptionKey);
-    await _firestore
-        .collection('rooms')
-        .doc(roomId)
-        .collection('messages')
-        .add({
+    await _firestore.collection('rooms').doc(roomId).collection('messages').add({
       'encText': encText,
       'encName': encName,
       'senderAvatar': senderAvatar,
@@ -111,29 +107,92 @@ class ChatService {
     required String senderName,
     required String senderAvatar,
     required String encryptionKey,
-    required String mediaId,
     required String mediaName,
     required String mediaType,
-    required int mediaSize,
+    required Uint8List fileData,
   }) async {
     final encName = CryptoService.encrypt(senderName, encryptionKey);
     final encMediaName = CryptoService.encrypt(mediaName, encryptionKey);
     final encText = CryptoService.encrypt('📎 $mediaName', encryptionKey);
-    await _firestore
-        .collection('rooms')
-        .doc(roomId)
-        .collection('messages')
-        .add({
-      'encText': encText,
-      'encName': encName,
-      'senderAvatar': senderAvatar,
-      'senderId': senderId,
-      'mediaId': mediaId,
-      'encMediaName': encMediaName,
-      'mediaType': mediaType,
-      'mediaSize': mediaSize,
-      'timestamp': FieldValue.serverTimestamp(),
-    });
+
+    // Convert to base64 then encrypt
+    final base64Data = base64Encode(fileData);
+    final encMediaData = CryptoService.encrypt(base64Data, encryptionKey);
+
+    if (encMediaData.length <= chunkMax) {
+      // Small file — inline
+      await _firestore.collection('rooms').doc(roomId).collection('messages').add({
+        'encText': encText,
+        'encName': encName,
+        'senderAvatar': senderAvatar,
+        'senderId': senderId,
+        'encMediaName': encMediaName,
+        'mediaType': mediaType,
+        'mediaSize': fileData.length,
+        'encMediaData': encMediaData,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+    } else {
+      // Large file — chunks
+      final chunks = (encMediaData.length / chunkMax).ceil();
+      final msgRef = await _firestore
+          .collection('rooms').doc(roomId).collection('messages').add({
+        'encText': encText,
+        'encName': encName,
+        'senderAvatar': senderAvatar,
+        'senderId': senderId,
+        'encMediaName': encMediaName,
+        'mediaType': mediaType,
+        'mediaSize': fileData.length,
+        'mediaChunks': chunks,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      for (var i = 0; i < chunks; i++) {
+        final start = i * chunkMax;
+        final end = (start + chunkMax).clamp(0, encMediaData.length);
+        await msgRef.collection('chunks').doc('$i').set({
+          'data': encMediaData.substring(start, end),
+        });
+      }
+    }
+  }
+
+  // Load and decrypt media data
+  static Future<Uint8List?> loadMediaData({
+    required String roomId,
+    required String messageId,
+    String? encMediaData,
+    int? mediaChunks,
+    required String encryptionKey,
+  }) async {
+    try {
+      String fullEncData;
+
+      if (encMediaData != null) {
+        fullEncData = encMediaData;
+      } else if (mediaChunks != null && mediaChunks > 0) {
+        final parts = <String>[];
+        for (var i = 0; i < mediaChunks; i++) {
+          final chunkSnap = await _firestore
+              .collection('rooms').doc(roomId)
+              .collection('messages').doc(messageId)
+              .collection('chunks').doc('$i').get();
+          if (chunkSnap.exists) {
+            parts.add(chunkSnap.data()!['data'] as String);
+          }
+        }
+        fullEncData = parts.join('');
+      } else {
+        return null;
+      }
+
+      final base64Data = CryptoService.decrypt(fullEncData, encryptionKey);
+      if (base64Data == '[Decryption failed]') return null;
+      return base64Decode(base64Data);
+    } catch (_) {
+      return null;
+    }
   }
 
   static Future<void> editMessage({
@@ -144,22 +203,23 @@ class ChatService {
   }) async {
     final encText = CryptoService.encrypt(newText, encryptionKey);
     await _firestore
-        .collection('rooms')
-        .doc(roomId)
-        .collection('messages')
-        .doc(messageId)
-        .update({
-      'encText': encText,
-      'edited': true,
-    });
+        .collection('rooms').doc(roomId)
+        .collection('messages').doc(messageId)
+        .update({'encText': encText, 'edited': true});
   }
 
   static Future<void> deleteMessage(String roomId, String messageId) async {
+    // Delete chunks
+    final chunksSnap = await _firestore
+        .collection('rooms').doc(roomId)
+        .collection('messages').doc(messageId)
+        .collection('chunks').get();
+    for (final doc in chunksSnap.docs) {
+      await doc.reference.delete();
+    }
     await _firestore
-        .collection('rooms')
-        .doc(roomId)
-        .collection('messages')
-        .doc(messageId)
+        .collection('rooms').doc(roomId)
+        .collection('messages').doc(messageId)
         .delete();
   }
 
@@ -168,28 +228,18 @@ class ChatService {
     String encryptionKey,
   ) {
     return _firestore
-        .collection('rooms')
-        .doc(roomId)
+        .collection('rooms').doc(roomId)
         .collection('messages')
         .orderBy('timestamp', descending: false)
         .snapshots()
         .map((snapshot) {
       return snapshot.docs.map((doc) {
         final data = doc.data();
-        final text = CryptoService.decrypt(
-          data['encText'] ?? '',
-          encryptionKey,
-        );
-        final name = CryptoService.decrypt(
-          data['encName'] ?? '',
-          encryptionKey,
-        );
+        final text = CryptoService.decrypt(data['encText'] ?? '', encryptionKey);
+        final name = CryptoService.decrypt(data['encName'] ?? '', encryptionKey);
         String? mediaName;
         if (data['encMediaName'] != null) {
-          mediaName = CryptoService.decrypt(
-            data['encMediaName'],
-            encryptionKey,
-          );
+          mediaName = CryptoService.decrypt(data['encMediaName'], encryptionKey);
         }
         return ChatMessage(
           id: doc.id,
@@ -199,35 +249,26 @@ class ChatService {
           senderAvatar: data['senderAvatar'] ?? '😀',
           timestamp: data['timestamp'] as Timestamp?,
           edited: data['edited'] ?? false,
-          mediaId: data['mediaId'],
           mediaName: mediaName,
           mediaType: data['mediaType'],
           mediaSize: data['mediaSize'],
+          encMediaData: data['encMediaData'],
+          mediaChunks: data['mediaChunks'],
         );
       }).toList();
     });
   }
 
   static Future<void> deleteRoom(String roomId) async {
-    // Delete messages
     final messages = await _firestore
-        .collection('rooms')
-        .doc(roomId)
-        .collection('messages')
-        .get();
-    for (final doc in messages.docs) {
-      await doc.reference.delete();
+        .collection('rooms').doc(roomId).collection('messages').get();
+    for (final msgDoc in messages.docs) {
+      final chunks = await msgDoc.reference.collection('chunks').get();
+      for (final chunk in chunks.docs) {
+        await chunk.reference.delete();
+      }
+      await msgDoc.reference.delete();
     }
-    // Delete signals
-    final signals = await _firestore
-        .collection('rooms')
-        .doc(roomId)
-        .collection('signals')
-        .get();
-    for (final doc in signals.docs) {
-      await doc.reference.delete();
-    }
-    // Delete room
     await _firestore.collection('rooms').doc(roomId).delete();
   }
 }

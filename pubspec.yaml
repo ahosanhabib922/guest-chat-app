@@ -38,7 +38,6 @@ dependencies:
   cloud_firestore: ^6.2.0
   firebase_auth: ^6.3.0
   pointycastle: ^4.0.0
-  flutter_webrtc: ^1.4.1
   file_picker: ^10.3.10
   uuid: ^4.5.3
 
