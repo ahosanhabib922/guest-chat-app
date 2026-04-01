@@ -4,7 +4,8 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-const _chunkSize = 16384; // 16KB
+const _chunkSize = 65536; // 64KB chunks
+const _burstChunks = 16; // Send up to 16 chunks (1MB) per burst
 
 final _iceServers = <Map<String, dynamic>>[
   {
@@ -25,7 +26,6 @@ class PeerService {
     _hostedFiles.remove(mediaId);
   }
 
-  /// Start hosting — listen for incoming P2P requests
   static void startHosting(String roomId, String userId) {
     _hostListener?.cancel();
     _hostListener = _firestore
@@ -65,9 +65,7 @@ class PeerService {
 
     dc.onDataChannelState = (state) {
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
-        // Send size metadata
         dc.send(RTCDataChannelMessage(jsonEncode({'size': fileData.length})));
-        // Send chunks
         _sendChunks(dc, fileData);
       }
     };
@@ -82,14 +80,12 @@ class PeerService {
       });
     };
 
-    // Set remote offer
     final offer = jsonDecode(signal['data']);
     await pc.setRemoteDescription(RTCSessionDescription(
       offer['sdp'],
       offer['type'],
     ));
 
-    // Create answer
     final answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
@@ -101,7 +97,6 @@ class PeerService {
       'data': jsonEncode(answer.toMap()),
     });
 
-    // Listen for ICE from receiver
     _firestore
         .collection('rooms')
         .doc(roomId)
@@ -125,23 +120,30 @@ class PeerService {
     });
   }
 
+  /// Burst-send chunks — sends multiple chunks per tick, pauses when buffer full
   static void _sendChunks(RTCDataChannel dc, Uint8List data) {
     var offset = 0;
-    Timer.periodic(const Duration(milliseconds: 10), (timer) {
-      if (offset >= data.length) {
-        timer.cancel();
-        Future.delayed(const Duration(milliseconds: 500), () => dc.close());
-        return;
+
+    void drainBuffer() {
+      var sent = 0;
+      while (offset < data.length && sent < _burstChunks) {
+        final end = (offset + _chunkSize).clamp(0, data.length);
+        dc.send(RTCDataChannelMessage.fromBinary(data.sublist(offset, end)));
+        offset = end;
+        sent++;
       }
-      final end = (offset + _chunkSize).clamp(0, data.length);
-      dc.send(RTCDataChannelMessage.fromBinary(
-        data.sublist(offset, end),
-      ));
-      offset = end;
-    });
+
+      if (offset >= data.length) {
+        Future.delayed(const Duration(milliseconds: 200), () => dc.close());
+      } else {
+        // Brief pause to let buffer drain, then send more
+        Future.delayed(const Duration(milliseconds: 5), drainBuffer);
+      }
+    }
+
+    drainBuffer();
   }
 
-  /// Request a file from the sender via WebRTC P2P
   static Future<void> requestFile({
     required String roomId,
     required String mediaId,
@@ -194,7 +196,6 @@ class PeerService {
       });
     };
 
-    // Listen for answer
     _firestore
         .collection('rooms')
         .doc(roomId)
@@ -216,7 +217,6 @@ class PeerService {
       }
     });
 
-    // Listen for ICE from sender
     _firestore
         .collection('rooms')
         .doc(roomId)
@@ -241,7 +241,6 @@ class PeerService {
 
     // Create offer
     final dc = await pc.createDataChannel('file', RTCDataChannelInit());
-    // We don't use dc here, just need to trigger negotiation
     dc.close();
 
     final offer = await pc.createOffer();
@@ -255,7 +254,6 @@ class PeerService {
       'data': jsonEncode(offer.toMap()),
     });
 
-    // Timeout
     Future.delayed(const Duration(seconds: 15), () {
       if (received == 0) {
         onError('Sender is offline');
