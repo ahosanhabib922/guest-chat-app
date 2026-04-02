@@ -17,6 +17,13 @@ class _HomeScreenState extends State<HomeScreen> {
   int _ttl = 60;
   bool _loading = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // Clean up expired rooms on every home screen visit
+    ChatService.cleanupExpiredRooms();
+  }
+
   Future<void> _startChat() async {
     if (_nameController.text.trim().isEmpty) {
       _showError('Please enter your name.');

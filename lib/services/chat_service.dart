@@ -294,4 +294,20 @@ class ChatService {
     }
     await _firestore.collection('rooms').doc(roomId).delete();
   }
+
+  /// Clean up all expired rooms — runs on every app open
+  static Future<void> cleanupExpiredRooms() async {
+    try {
+      final now = Timestamp.now();
+      final snapshot = await _firestore
+          .collection('rooms')
+          .where('expiresAt', isLessThanOrEqualTo: now)
+          .get();
+      for (final doc in snapshot.docs) {
+        await deleteRoom(doc.id);
+      }
+    } catch (_) {
+      // Silently ignore — cleanup is best-effort
+    }
+  }
 }
