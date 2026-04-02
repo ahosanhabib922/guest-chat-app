@@ -69,10 +69,27 @@ class ChatService {
     return credential.user!.uid;
   }
 
+  static Timestamp? _roomExpiresAt;
+
+  static void setRoomExpiresAt(Timestamp ts) {
+    _roomExpiresAt = ts;
+  }
+
+  static Timestamp _getExpiresAt() {
+    return _roomExpiresAt ?? Timestamp.fromMillisecondsSinceEpoch(
+      DateTime.now().millisecondsSinceEpoch + 60 * 60 * 1000,
+    );
+  }
+
   static Future<void> createRoom(String roomId, int ttlMinutes) async {
+    final expiresAt = Timestamp.fromMillisecondsSinceEpoch(
+      DateTime.now().millisecondsSinceEpoch + ttlMinutes * 60 * 1000,
+    );
+    _roomExpiresAt = expiresAt;
     await _firestore.collection('rooms').doc(roomId).set({
       'createdAt': FieldValue.serverTimestamp(),
       'ttlMinutes': ttlMinutes,
+      'expiresAt': expiresAt,
     });
   }
 
@@ -98,6 +115,7 @@ class ChatService {
       'senderAvatar': senderAvatar,
       'senderId': senderId,
       'timestamp': FieldValue.serverTimestamp(),
+      'expiresAt': _getExpiresAt(),
     });
   }
 
@@ -119,6 +137,8 @@ class ChatService {
     final base64Data = base64Encode(fileData);
     final encMediaData = CryptoService.encrypt(base64Data, encryptionKey);
 
+    final expiry = _getExpiresAt();
+
     if (encMediaData.length <= chunkMax) {
       // Small file — inline
       await _firestore.collection('rooms').doc(roomId).collection('messages').add({
@@ -131,6 +151,7 @@ class ChatService {
         'mediaSize': fileData.length,
         'encMediaData': encMediaData,
         'timestamp': FieldValue.serverTimestamp(),
+        'expiresAt': expiry,
       });
     } else {
       // Large file — chunks
@@ -146,6 +167,7 @@ class ChatService {
         'mediaSize': fileData.length,
         'mediaChunks': chunks,
         'timestamp': FieldValue.serverTimestamp(),
+        'expiresAt': expiry,
       });
 
       for (var i = 0; i < chunks; i++) {
@@ -153,6 +175,7 @@ class ChatService {
         final end = (start + chunkMax).clamp(0, encMediaData.length);
         await msgRef.collection('chunks').doc('$i').set({
           'data': encMediaData.substring(start, end),
+          'expiresAt': expiry,
         });
       }
     }

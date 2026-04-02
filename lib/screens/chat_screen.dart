@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/chat_service.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -47,6 +48,9 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _userId = uid);
 
     final room = await ChatService.getRoomInfo(widget.roomId);
+    if (room != null && room['expiresAt'] != null) {
+      ChatService.setRoomExpiresAt(room['expiresAt'] as Timestamp);
+    }
     if (room != null && room['createdAt'] != null) {
       final createdMs = (room['createdAt'] as dynamic).millisecondsSinceEpoch as int;
       final ttlMs = (room['ttlMinutes'] as int) * 60 * 1000;
